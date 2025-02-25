@@ -4,13 +4,13 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::marker::PhantomData;
 
-use itertools::{izip, Itertools};
+use itertools::{Itertools, izip};
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_commit::{Mmcs, OpenedValues, Pcs, PolynomialSpace, TwoAdicMultiplicativeCoset};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{
-    batch_multiplicative_inverse, cyclic_subgroup_coset_known_order, dot_product, ExtensionField,
-    Field, TwoAdicField,
+    ExtensionField, Field, TwoAdicField, batch_multiplicative_inverse,
+    cyclic_subgroup_coset_known_order, dot_product,
 };
 use p3_interpolation::interpolate_coset;
 use p3_matrix::bitrev::{BitReversableMatrix, BitReversalPerm, BitReversedMatrixView};
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info_span, instrument};
 
 use crate::verifier::{self, FriError};
-use crate::{prover, FriConfig, FriGenericConfig, FriProof};
+use crate::{FriConfig, FriGenericConfig, FriProof, prover};
 
 #[derive(Debug)]
 pub struct TwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
@@ -296,7 +296,8 @@ where
                                                 Some(&inv_denoms),
                                             )
                                         });
-                                ys.iter().for_each(|&y| challenger.observe_ext_element(y));
+                                ys.iter()
+                                    .for_each(|&y| challenger.observe_algebra_element(y));
                                 ys
                             })
                             .collect_vec()
@@ -306,7 +307,7 @@ where
             .collect_vec();
 
         // Batch combination challenge
-        let alpha: Challenge = challenger.sample_ext_element();
+        let alpha: Challenge = challenger.sample_algebra_element();
 
         let mut num_reduced = [0; 32];
         let mut reduced_openings: [_; 32] = core::array::from_fn(|_| None);
@@ -397,18 +398,18 @@ where
         challenger: &mut Challenger,
     ) -> Result<(), Self::Error> {
         // Write evaluations to challenger
-        for (_, round) in rounds.iter() {
-            for (_, mat) in round.iter() {
-                for (_, point) in mat.iter() {
+        for (_, round) in &rounds {
+            for (_, mat) in round {
+                for (_, point) in mat {
                     point
                         .iter()
-                        .for_each(|&opening| challenger.observe_ext_element(opening));
+                        .for_each(|&opening| challenger.observe_algebra_element(opening));
                 }
             }
         }
 
         // Batch combination challenge
-        let alpha: Challenge = challenger.sample_ext_element();
+        let alpha: Challenge = challenger.sample_algebra_element();
 
         let log_global_max_height =
             proof.commit_phase_commits.len() + self.fri.log_blowup + self.fri.log_final_poly_len;

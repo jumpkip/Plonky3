@@ -4,13 +4,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use itertools::{izip, Itertools};
+use itertools::{Itertools, izip};
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_commit::{Mmcs, OpenedValues, Pcs, PolynomialSpace};
 use p3_field::extension::ComplexExtendable;
 use p3_field::{ExtensionField, Field};
-use p3_fri::verifier::FriError;
 use p3_fri::FriConfig;
+use p3_fri::verifier::FriError;
 use p3_matrix::dense::{DenseMatrix, RowMajorMatrix};
 use p3_matrix::row_index_mapped::RowIndexMappedView;
 use p3_matrix::{Dimensions, Matrix};
@@ -21,11 +21,11 @@ use tracing::info_span;
 
 use crate::deep_quotient::{deep_quotient_reduce_row, extract_lambda};
 use crate::domain::CircleDomain;
-use crate::folding::{fold_y, fold_y_row, CircleFriConfig, CircleFriGenericConfig};
+use crate::folding::{CircleFriConfig, CircleFriGenericConfig, fold_y, fold_y_row};
 use crate::point::Point;
 use crate::prover::prove;
 use crate::verifier::verify;
-use crate::{cfft_permute_index, CfftPerm, CfftPermutable, CircleEvaluations, CircleFriProof};
+use crate::{CfftPerm, CfftPermutable, CircleEvaluations, CircleFriProof, cfft_permute_index};
 
 #[derive(Debug)]
 pub struct CirclePcs<Val: Field, InputMmcs, FriMmcs> {
@@ -35,7 +35,7 @@ pub struct CirclePcs<Val: Field, InputMmcs, FriMmcs> {
 }
 
 impl<Val: Field, InputMmcs, FriMmcs> CirclePcs<Val, InputMmcs, FriMmcs> {
-    pub fn new(mmcs: InputMmcs, fri_config: FriConfig<FriMmcs>) -> Self {
+    pub const fn new(mmcs: InputMmcs, fri_config: FriConfig<FriMmcs>) -> Self {
         Self {
             mmcs,
             fri_config,
@@ -194,7 +194,7 @@ where
                                         .in_scope(|| evals.evaluate_at_point(zeta));
                                 ps_at_zeta
                                     .iter()
-                                    .for_each(|&p| challenger.observe_ext_element(p));
+                                    .for_each(|&p| challenger.observe_algebra_element(p));
                                 ps_at_zeta
                             })
                             .collect()
@@ -204,7 +204,7 @@ where
             .collect();
 
         // Batch combination challenge
-        let alpha: Challenge = challenger.sample_ext_element();
+        let alpha: Challenge = challenger.sample_algebra_element();
 
         /*
         We are reducing columns ("ro" = reduced opening) with powers of alpha:
@@ -286,7 +286,7 @@ where
         let (first_layer_commitment, first_layer_data) =
             self.fri_config.mmcs.commit(first_layer_mats);
         challenger.observe(first_layer_commitment.clone());
-        let bivariate_beta: Challenge = challenger.sample_ext_element();
+        let bivariate_beta: Challenge = challenger.sample_algebra_element();
 
         // Fold all first layers at bivariate_beta.
 
@@ -373,20 +373,20 @@ where
         challenger: &mut Challenger,
     ) -> Result<(), Self::Error> {
         // Write evaluations to challenger
-        for (_, round) in rounds.iter() {
-            for (_, mat) in round.iter() {
-                for (_, point) in mat.iter() {
+        for (_, round) in &rounds {
+            for (_, mat) in round {
+                for (_, point) in mat {
                     point
                         .iter()
-                        .for_each(|&opening| challenger.observe_ext_element(opening));
+                        .for_each(|&opening| challenger.observe_algebra_element(opening));
                 }
             }
         }
 
         // Batch combination challenge
-        let alpha: Challenge = challenger.sample_ext_element();
+        let alpha: Challenge = challenger.sample_algebra_element();
         challenger.observe(proof.first_layer_commitment.clone());
-        let bivariate_beta: Challenge = challenger.sample_ext_element();
+        let bivariate_beta: Challenge = challenger.sample_algebra_element();
 
         // +1 to account for first layer
         let log_global_max_height =
@@ -496,7 +496,7 @@ where
                                     // - 1 here is log_arity.
                                     log_height - 1,
                                     bivariate_beta,
-                                    fl_values.iter().cloned(),
+                                    fl_values.iter().copied(),
                                 ),
                             );
 
@@ -590,7 +590,7 @@ mod tests {
         let (comm, data) =
             <Pcs as p3_commit::Pcs<Challenge, Challenger>>::commit(&pcs, vec![(d, evals)]);
 
-        let zeta: Challenge = rng.gen();
+        let zeta: Challenge = rng.random();
 
         let mut chal = Challenger::from_hasher(vec![], byte_hash);
         let (values, proof) = pcs.open(vec![(&data, vec![vec![zeta]])], &mut chal);
