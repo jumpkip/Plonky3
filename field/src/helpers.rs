@@ -1,10 +1,8 @@
-use alloc::vec;
 use alloc::vec::Vec;
 use core::iter::Sum;
-use core::mem::{ManuallyDrop, MaybeUninit};
+use core::mem::MaybeUninit;
 use core::ops::Mul;
 
-use num_bigint::BigUint;
 use p3_maybe_rayon::prelude::{IntoParallelRefMutIterator, ParallelIterator};
 
 use crate::field::Field;
@@ -38,17 +36,6 @@ pub fn cyclic_subgroup_coset_known_order<F: Field>(
     generator.shifted_powers(shift).take(order)
 }
 
-#[must_use]
-pub fn add_vecs<F: Field>(v: Vec<F>, w: Vec<F>) -> Vec<F> {
-    assert_eq!(v.len(), w.len());
-    v.into_iter().zip(w).map(|(x, y)| x + y).collect()
-}
-
-pub fn sum_vecs<F: Field, I: Iterator<Item = Vec<F>>>(iter: I) -> Vec<F> {
-    iter.reduce(|v, w| add_vecs(v, w))
-        .expect("sum_vecs: empty iterator")
-}
-
 pub fn scale_vec<F: Field>(s: F, vec: Vec<F>) -> Vec<F> {
     vec.into_iter().map(|x| s * x).collect()
 }
@@ -70,163 +57,74 @@ where
     x.iter_mut().zip(y).for_each(|(x_i, y_i)| *x_i += y_i * s);
 }
 
-// The ideas for the following work around come from the construe crate along with
-// the playground example linked in the following comment:
-// https://github.com/rust-lang/rust/issues/115403#issuecomment-1701000117
-
-// The goal is to want to make field_to_array a const function in order
-// to allow us to convert R constants to BinomialExtensionField<R, D> constants.
-//
-// The natural approach would be:
-// fn field_to_array<R: PrimeCharacteristicRing, const D: usize>(x: R) -> [R; D]
-//      let mut arr: [R; D] = [R::ZERO; D];
-//      arr[0] = x
-//      arr
-//
-// Unfortunately this doesn't compile as R does not implement Copy and so instead
-// implements Drop which cannot be run in constant contexts. Clearly nothing should
-// actually be dropped by the above function but the compiler is unable to determine this.
-// There is a rust issue for this: https://github.com/rust-lang/rust/issues/73255
-// but it seems unlikely to be stabilized anytime soon.
-//
-// The natural workaround for this is to use MaybeUninit and set each element of the list
-// separately. This mostly works but we end up with an array of the form [MaybeUninit<T>; N]
-// and there is not currently a way in the standard library to convert this to [T; N].
-// There is a method on nightly: array_assume_init so this function should be reworked after
-// that has stabilized (More details in Rust issue: https://github.com/rust-lang/rust/issues/96097).
-//
-// Annoyingly, both transmute and transmute_copy fail here. The first because it cannot handle
-// const generics and the second due to interior mutability and the inability to use &mut in const
-// functions.
-//
-// The solution is to implement the map [MaybeUninit<T>; D]) -> MaybeUninit<[T; D]>
-// using Union types and ManuallyDrop to essentially do a manual transmute.
-
-union HackyWorkAround<T, const D: usize> {
-    complete: ManuallyDrop<MaybeUninit<[T; D]>>,
-    elements: ManuallyDrop<[MaybeUninit<T>; D]>,
-}
-
-impl<T, const D: usize> HackyWorkAround<T, D> {
-    const fn transpose(arr: [MaybeUninit<T>; D]) -> MaybeUninit<[T; D]> {
-        // This is safe as [MaybeUninit<T>; D]> and MaybeUninit<[T; D]> are
-        // the same type regardless of T. Both are an array or size equal to [T; D]
-        // with some data potentially not initialized.
-        let transpose = Self {
-            elements: ManuallyDrop::new(arr),
-        };
-        unsafe { ManuallyDrop::into_inner(transpose.complete) }
-    }
-}
-
 /// Extend a ring `R` element `x` to an array of length `D`
 /// by filling zeros.
 #[inline]
 pub const fn field_to_array<R: PrimeCharacteristicRing, const D: usize>(x: R) -> [R; D] {
-    let mut arr: [MaybeUninit<R>; D] = unsafe { MaybeUninit::uninit().assume_init() };
-
+    let mut arr: [_; D] = [const { MaybeUninit::uninit() }; D];
     arr[0] = MaybeUninit::new(x);
-    let mut acc = 1;
-    loop {
-        if acc == D {
-            break;
-        }
-        arr[acc] = MaybeUninit::new(R::ZERO);
-        acc += 1;
+    let mut i = 1;
+    while i < D {
+        arr[i] = MaybeUninit::new(R::ZERO);
+        i += 1;
     }
-    // If the code has reached this point every element of arr is correctly initialized.
-    // Hence we are safe to reinterpret the array as [R; D].
-
-    unsafe { HackyWorkAround::transpose(arr).assume_init() }
-}
-
-/// Naive polynomial multiplication.
-pub fn naive_poly_mul<R: PrimeCharacteristicRing>(a: &[R], b: &[R]) -> Vec<R> {
-    // Grade school algorithm
-    let mut product = vec![R::ZERO; a.len() + b.len() - 1];
-    for (i, c1) in a.iter().enumerate() {
-        for (j, c2) in b.iter().enumerate() {
-            product[i + j] += c1.clone() * c2.clone();
-        }
-    }
-    product
-}
-
-/// Expand a product of binomials `(x - roots[0])(x - roots[1])..` into polynomial coefficients.
-pub fn binomial_expand<R: PrimeCharacteristicRing>(roots: &[R]) -> Vec<R> {
-    let mut coeffs = vec![R::ZERO; roots.len() + 1];
-    coeffs[0] = R::ONE;
-    for (i, x) in roots.iter().enumerate() {
-        for j in (1..i + 2).rev() {
-            coeffs[j] = coeffs[j - 1].clone() - x.clone() * coeffs[j].clone();
-        }
-        coeffs[0] *= -x.clone();
-    }
-    coeffs
-}
-
-pub fn eval_poly<R: PrimeCharacteristicRing>(poly: &[R], x: R) -> R {
-    let mut acc = R::ZERO;
-    for coeff in poly.iter().rev() {
-        acc *= x.clone();
-        acc += coeff.clone();
-    }
-    acc
+    unsafe { core::mem::transmute_copy::<_, [R; D]>(&arr) }
 }
 
 /// Given an element x from a 32 bit field F_P compute x/2.
 #[inline]
-pub const fn halve_u32<const P: u32>(input: u32) -> u32 {
+pub const fn halve_u32<const P: u32>(x: u32) -> u32 {
     let shift = (P + 1) >> 1;
-    let shr = input >> 1;
-    let lo_bit = input & 1;
-    let shr_corr = shr + shift;
-    if lo_bit == 0 { shr } else { shr_corr }
+    let half = x >> 1;
+    if x & 1 == 0 { half } else { half + shift }
 }
 
 /// Given an element x from a 64 bit field F_P compute x/2.
 #[inline]
-pub const fn halve_u64<const P: u64>(input: u64) -> u64 {
+pub const fn halve_u64<const P: u64>(x: u64) -> u64 {
     let shift = (P + 1) >> 1;
-    let shr = input >> 1;
-    let lo_bit = input & 1;
-    let shr_corr = shr + shift;
-    if lo_bit == 0 { shr } else { shr_corr }
+    let half = x >> 1;
+    if x & 1 == 0 { half } else { half + shift }
 }
 
-/// Given a slice of SF elements, reduce them to a TF element using a 2^32-base decomposition.
+/// Reduce a slice of 32-bit field elements into a single element of a larger field.
 ///
-/// This is optimised assuming that the characteristic of TF is greater than 2^64.
+/// Uses base-$2^{32}$ decomposition:
+///
+/// ```math
+/// \begin{equation}
+///     \text{reduce\_32}(vals) = \sum_{i=0}^{n-1} a_i \cdot 2^{32i}
+/// \end{equation}
+/// ```
 pub fn reduce_32<SF: PrimeField32, TF: PrimeField>(vals: &[SF]) -> TF {
     // If the characteristic of TF is > 2^64, from_int and from_canonical_unchecked act identically
-    // on u64 and u32 inputs so we use the safer option.
-    let po2 = TF::from_int(1u64 << 32);
-    let mut result = TF::ZERO;
-    for val in vals.iter().rev() {
-        result = result * po2 + TF::from_int(val.as_canonical_u32());
-    }
-    result
+    let base = TF::from_int(1u64 << 32);
+    vals.iter().rev().fold(TF::ZERO, |acc, val| {
+        acc * base + TF::from_int(val.as_canonical_u32())
+    })
 }
 
-/// Given an SF element, split it to a vector of TF elements using a 2^64-base decomposition.
+/// Split a large field element into `n` base-$2^{64}$ chunks and map each into a 32-bit field.
 ///
-/// We use a 2^64-base decomposition for a field of size ~2^32 because then the bias will be
-/// at most ~1/2^32 for each element after the reduction.
+/// Converts:
+/// ```math
+/// \begin{equation}
+///     x = \sum_{i=0}^{n-1} d_i \cdot 2^{64i}
+/// \end{equation}
+/// ```
+///
+/// Pads with zeros if needed.
 pub fn split_32<SF: PrimeField, TF: PrimeField32>(val: SF, n: usize) -> Vec<TF> {
-    let po2 = BigUint::from(1u128 << 64);
-    let mut val = val.as_canonical_biguint();
-    let mut result = Vec::new();
-    for _ in 0..n {
-        let mask: BigUint = po2.clone() - BigUint::from(1u128);
-        let digit: BigUint = val.clone() & mask;
-        let digit_u64s = digit.to_u64_digits();
-        if digit_u64s.is_empty() {
-            result.push(TF::ZERO)
-        } else {
-            result.push(TF::from_int(digit_u64s[0]));
-        }
-        val /= po2.clone();
-    }
+    let mut result: Vec<TF> = val
+        .as_canonical_biguint()
+        .to_u64_digits()
+        .iter()
+        .take(n)
+        .map(|d| TF::from_u64(*d))
+        .collect();
+
+    // Pad with zeros if needed
+    result.resize_with(n, || TF::ZERO);
     result
 }
 

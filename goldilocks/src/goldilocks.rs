@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::fmt::{Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
-use core::intrinsics::transmute;
 use core::iter::{Product, Sum};
+use core::mem::transmute;
 use core::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use num_bigint::BigUint;
@@ -55,6 +55,45 @@ impl Goldilocks {
 
     /// Two's complement of `ORDER`, i.e. `2^64 - ORDER = 2^32 - 1`.
     const NEG_ORDER: u64 = Self::ORDER_U64.wrapping_neg();
+
+    /// A list of generators for the two-adic subgroups of the goldilocks field.
+    ///
+    /// These satisfy the properties that `TWO_ADIC_GENERATORS[0] = 1` and `TWO_ADIC_GENERATORS[i+1]^2 = TWO_ADIC_GENERATORS[i]`.
+    pub const TWO_ADIC_GENERATORS: [Goldilocks; 33] = Goldilocks::new_array([
+        0x0000000000000001,
+        0xffffffff00000000,
+        0x0001000000000000,
+        0xfffffffeff000001,
+        0xefffffff00000001,
+        0x00003fffffffc000,
+        0x0000008000000000,
+        0xf80007ff08000001,
+        0xbf79143ce60ca966,
+        0x1905d02a5c411f4e,
+        0x9d8f2ad78bfed972,
+        0x0653b4801da1c8cf,
+        0xf2c35199959dfcb6,
+        0x1544ef2335d17997,
+        0xe0ee099310bba1e2,
+        0xf6b2cffe2306baac,
+        0x54df9630bf79450e,
+        0xabd0a6e8aa3d8a0e,
+        0x81281a7b05f9beac,
+        0xfbd41c6b8caa3302,
+        0x30ba2ecd5e93e76d,
+        0xf502aef532322654,
+        0x4b2a18ade67246b5,
+        0xea9d5a1336fbc98b,
+        0x86cdcc31c307e171,
+        0x4bbaf5976ecfefd8,
+        0xed41d05b78d6e286,
+        0x10d78dd8915a171d,
+        0x59049500004a4485,
+        0xdfa8c93ba46d2666,
+        0x7e9bd009b86a0845,
+        0x400a7f755588e659,
+        0x185629dcda58878c,
+    ]);
 }
 
 impl PartialEq for Goldilocks {
@@ -124,6 +163,21 @@ impl PrimeCharacteristicRing for Goldilocks {
 
     fn from_bool(b: bool) -> Self {
         Self::new(b.into())
+    }
+
+    #[inline]
+    fn sum_array<const N: usize>(input: &[Self]) -> Self {
+        assert_eq!(N, input.len());
+        // Benchmarking shows that for N <= 3 it's faster to sum the elements directly
+        // but for N > 3 it's faster to use the .sum() methods which passes through u128's
+        // allowing for delayed reductions.
+        match N {
+            0 => Self::ZERO,
+            1 => input[0],
+            2 => input[0] + input[1],
+            3 => input[0] + input[1] + input[2],
+            _ => input.iter().copied().sum(),
+        }
     }
 
     #[inline]
@@ -346,51 +400,12 @@ impl PrimeField64 for Goldilocks {
     }
 }
 
-/// A list of generators for the two-adic subgroups of the goldilocks field.
-///
-/// These satisfy the properties that `TWO_ADIC_GENERATORS[0] = 1` and `TWO_ADIC_GENERATORS[i+1]^2 = TWO_ADIC_GENERATORS[i]`.
-const TWO_ADIC_GENERATORS: [Goldilocks; 33] = Goldilocks::new_array([
-    0x0000000000000001,
-    0xffffffff00000000,
-    0x0001000000000000,
-    0xfffffffeff000001,
-    0xefffffff00000001,
-    0x00003fffffffc000,
-    0x0000008000000000,
-    0xf80007ff08000001,
-    0xbf79143ce60ca966,
-    0x1905d02a5c411f4e,
-    0x9d8f2ad78bfed972,
-    0x0653b4801da1c8cf,
-    0xf2c35199959dfcb6,
-    0x1544ef2335d17997,
-    0xe0ee099310bba1e2,
-    0xf6b2cffe2306baac,
-    0x54df9630bf79450e,
-    0xabd0a6e8aa3d8a0e,
-    0x81281a7b05f9beac,
-    0xfbd41c6b8caa3302,
-    0x30ba2ecd5e93e76d,
-    0xf502aef532322654,
-    0x4b2a18ade67246b5,
-    0xea9d5a1336fbc98b,
-    0x86cdcc31c307e171,
-    0x4bbaf5976ecfefd8,
-    0xed41d05b78d6e286,
-    0x10d78dd8915a171d,
-    0x59049500004a4485,
-    0xdfa8c93ba46d2666,
-    0x7e9bd009b86a0845,
-    0x400a7f755588e659,
-    0x185629dcda58878c,
-]);
-
 impl TwoAdicField for Goldilocks {
     const TWO_ADICITY: usize = 32;
 
     fn two_adic_generator(bits: usize) -> Self {
         assert!(bits <= Self::TWO_ADICITY);
-        TWO_ADIC_GENERATORS[bits]
+        Self::TWO_ADIC_GENERATORS[bits]
     }
 }
 
@@ -626,7 +641,29 @@ mod tests {
         assert_eq!(F::TWO.injective_exp_n().injective_exp_root_n(), F::TWO);
     }
 
-    test_field!(crate::Goldilocks);
+    // Goldilocks has a redundant representation for both 0 and 1.
+    const ZEROS: [Goldilocks; 2] = [Goldilocks::ZERO, Goldilocks::new(P)];
+    const ONES: [Goldilocks; 2] = [Goldilocks::ONE, Goldilocks::new(P + 1)];
+
+    // Get the prime factorization of the order of the multiplicative group.
+    // i.e. the prime factorization of P - 1.
+    fn multiplicative_group_prime_factorization() -> [(BigUint, u32); 6] {
+        [
+            (BigUint::from(2u8), 32),
+            (BigUint::from(3u8), 1),
+            (BigUint::from(5u8), 1),
+            (BigUint::from(17u8), 1),
+            (BigUint::from(257u16), 1),
+            (BigUint::from(65537u32), 1),
+        ]
+    }
+
+    test_field!(
+        crate::Goldilocks,
+        &super::ZEROS,
+        &super::ONES,
+        &super::multiplicative_group_prime_factorization()
+    );
     test_prime_field!(crate::Goldilocks);
     test_prime_field_64!(crate::Goldilocks);
     test_two_adic_field!(crate::Goldilocks);

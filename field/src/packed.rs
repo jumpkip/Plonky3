@@ -1,6 +1,6 @@
 use core::mem::MaybeUninit;
 use core::ops::Div;
-use core::slice;
+use core::{array, slice};
 
 use crate::field::Field;
 use crate::{Algebra, BasedVectorSpace, ExtensionField, Powers, PrimeCharacteristicRing};
@@ -163,6 +163,20 @@ pub unsafe trait PackedField: Algebra<Self::Scalar>
             current,
         }
     }
+
+    /// Compute a linear combination of a slice of base field elements and
+    /// a slice of packed field elements. The slices must have equal length
+    /// and it must be a compile time constant.
+    /// 
+    /// # Panics
+    ///
+    /// May panic if the length of either slice is not equal to `N`.
+    fn packed_linear_combination<const N: usize>(coeffs: &[Self::Scalar], vecs: &[Self]) -> Self {
+        assert_eq!(coeffs.len(), N);
+        assert_eq!(vecs.len(), N);
+        let combined: [Self; N] = array::from_fn(|i| vecs[i] * coeffs[i]);
+        Self::sum_array::<N>(&combined)
+    }
 }
 
 /// # Safety
@@ -199,9 +213,11 @@ pub unsafe trait PackedFieldPow2: PackedField {
     /// We can also think about this as stacking the vectors, dividing them into 2x2 matrices, and
     /// transposing those matrices.
     ///
-    /// When `block_len = WIDTH`, this operation is a no-op. `block_len` must divide `WIDTH`. Since
-    /// `WIDTH` is specified to be a power of 2, `block_len` must also be a power of 2. It cannot be
-    /// 0 and it cannot exceed `WIDTH`.
+    /// When `block_len = WIDTH`, this operation is a no-op.
+    ///
+    /// # Panics
+    /// This may panic if `block_len` does not divide `WIDTH`. Since `WIDTH` is specified to be a power of 2,
+    /// `block_len` must also be a power of 2. It cannot be 0 and it cannot exceed `WIDTH`.
     fn interleave(&self, other: Self, block_len: usize) -> (Self, Self);
 }
 

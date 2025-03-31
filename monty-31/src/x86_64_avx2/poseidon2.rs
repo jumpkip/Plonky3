@@ -5,10 +5,11 @@ use core::arch::x86_64::{self, __m256i};
 use core::marker::PhantomData;
 use core::mem::transmute;
 
+use p3_field::PrimeCharacteristicRing;
 use p3_poseidon2::{
     ExternalLayer, ExternalLayerConstants, ExternalLayerConstructor, InternalLayer,
     InternalLayerConstructor, MDSMat4, external_initial_permute_state,
-    external_terminal_permute_state, sum_15, sum_23,
+    external_terminal_permute_state,
 };
 
 use crate::{
@@ -158,7 +159,7 @@ pub struct Poseidon2ExternalLayerMonty31<PMP: PackedMontyParameters, const WIDTH
 impl<FP: FieldParameters, const WIDTH: usize> ExternalLayerConstructor<MontyField31<FP>, WIDTH>
     for Poseidon2ExternalLayerMonty31<FP, WIDTH>
 {
-    /// Construct an instance of Poseidon2ExternalLayerMersenne31AVX2 from a array of
+    /// Construct an instance of Poseidon2ExternalLayerMersenne31AVX2 from an array of
     /// vectors containing the constants for each round. Internally, the constants
     ///  are transformed into the {-P, ..., 0} representation instead of the standard {0, ..., P} one.
     fn new_from_constants(
@@ -182,9 +183,12 @@ impl<FP: FieldParameters, const WIDTH: usize> ExternalLayerConstructor<MontyFiel
     }
 }
 
-/// Use hard coded methods to compute x -> x^d for the even index entries and small d.
-/// Inputs should be signed 32-bit integers in [-P, ..., P].
-/// Outputs will also be signed integers in (-P, ..., P) stored in the odd indices.
+/// Use hard coded methods to compute `x -> x^D` for the even index entries and small `D`.
+/// Inputs should be signed 32-bit integers in `[-P, ..., P]`.
+/// Outputs will also be signed integers in `(-P, ..., P)` stored in the odd indices.
+///
+/// # Panics
+/// This function will panic if `D` is not `3, 5` or `7`.
 #[inline(always)]
 #[must_use]
 fn exp_small<PMP: PackedMontyParameters, const D: u64>(val: __m256i) -> __m256i {
@@ -197,7 +201,7 @@ fn exp_small<PMP: PackedMontyParameters, const D: u64>(val: __m256i) -> __m256i 
 }
 
 /// Compute val -> (val + rc)^D. Each entry of val should be represented in canonical form.
-/// Each entry of rc should be represented by an element in in [-P, 0].
+/// Each entry of rc should be represented by an element in [-P, 0].
 /// Each entry of the output will be represented by an element in canonical form.
 /// If the inputs do not conform to this representation, the result is undefined.
 #[inline(always)]
@@ -373,14 +377,15 @@ where
 
             self.packed_internal_constants.iter().for_each(|&rc| {
                 add_rc_and_sbox::<FP, D>(&mut internal_state.s0, rc); // s0 -> (s0 + rc)^D
-                let sum_non_0 = sum_15(
-                    &transmute::<[__m256i; 15], [PackedMontyField31AVX2<FP>; 15]>(
-                        internal_state.s_hi,
-                    ),
-                ); // Get the sum of all elements other than s0.
+                let sum_tail = PackedMontyField31AVX2::<FP>::sum_array::<15>(&transmute::<
+                    [__m256i; 15],
+                    [PackedMontyField31AVX2<FP>; 15],
+                >(
+                    internal_state.s_hi,
+                )); // Get the sum of all elements other than s0.
                 ILP::diagonal_mul(&mut internal_state.s_hi); // si -> vi * si for all i > 0.
-                let sum = sum_non_0 + internal_state.s0; // Get the full sum.
-                internal_state.s0 = sum_non_0 - internal_state.s0; // s0 -> sum - 2*s0 = sum_non_0 - s0.
+                let sum = sum_tail + internal_state.s0; // Get the full sum.
+                internal_state.s0 = sum_tail - internal_state.s0; // s0 -> sum - 2*s0 = sum_tail - s0.
                 ILP::add_sum(
                     &mut internal_state.s_hi,
                     transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),
@@ -424,14 +429,15 @@ where
 
             self.packed_internal_constants.iter().for_each(|&rc| {
                 add_rc_and_sbox::<FP, D>(&mut internal_state.s0, rc); // s0 -> (s0 + rc)^D
-                let sum_non_0 = sum_23(
-                    &transmute::<[__m256i; 23], [PackedMontyField31AVX2<FP>; 23]>(
-                        internal_state.s_hi,
-                    ),
-                ); // Get the sum of all elements other than s0.
+                let sum_tail = PackedMontyField31AVX2::<FP>::sum_array::<23>(&transmute::<
+                    [__m256i; 23],
+                    [PackedMontyField31AVX2<FP>; 23],
+                >(
+                    internal_state.s_hi,
+                )); // Get the sum of all elements other than s0.
                 ILP::diagonal_mul(&mut internal_state.s_hi); // si -> vi * si for all i > 0.
-                let sum = sum_non_0 + internal_state.s0; // Get the full sum.
-                internal_state.s0 = sum_non_0 - internal_state.s0; // s0 -> sum - 2*s0 = sum_non_0 - s0.
+                let sum = sum_tail + internal_state.s0; // Get the full sum.
+                internal_state.s0 = sum_tail - internal_state.s0; // s0 -> sum - 2*s0 = sum_tail - s0.
                 ILP::add_sum(
                     &mut internal_state.s_hi,
                     transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),

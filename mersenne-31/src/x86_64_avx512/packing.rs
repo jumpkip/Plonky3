@@ -311,7 +311,7 @@ fn partial_reduce_neg(x: __m512i) -> __m512i {
 /// Compute the square of the Mersenne-31 field elements located in the even indices.
 /// These field elements are represented as values in {-P, ..., P}. If the even inputs
 /// do not conform to this representation, the result is undefined.
-/// The top half of each 64-bit lane is is ignored.
+/// The top half of each 64-bit lane is ignored.
 /// The top half of each 64-bit lane in the result is 0.
 #[inline(always)]
 fn square_unred(x: __m512i) -> __m512i {
@@ -593,7 +593,7 @@ impl Distribution<PackedMersenne31AVX512> for StandardUniform {
 fn interleave1_antidiagonal(x: __m512i, y: __m512i) -> __m512i {
     unsafe {
         // Safety: If this code got compiled then AVX-512VBMI2 intrinsics are available.
-        x86_64::_mm512_shrdi_epi64::<32>(y, x)
+        x86_64::_mm512_shrdi_epi64::<32>(x, y)
     }
 }
 
@@ -831,24 +831,25 @@ unsafe impl PackedFieldPow2 for PackedMersenne31AVX512 {
 mod tests {
     use p3_field_testing::test_packed_field;
 
-    use super::{Mersenne31, WIDTH};
+    use super::{Mersenne31, PackedMersenne31AVX512};
 
     /// Zero has a redundant representation, so let's test both.
-    const ZEROS: [Mersenne31; WIDTH] = Mersenne31::new_array([
+    const ZEROS: PackedMersenne31AVX512 = PackedMersenne31AVX512(Mersenne31::new_array([
         0x00000000, 0x7fffffff, 0x00000000, 0x7fffffff, 0x00000000, 0x7fffffff, 0x00000000,
         0x7fffffff, 0x00000000, 0x7fffffff, 0x00000000, 0x7fffffff, 0x00000000, 0x7fffffff,
         0x00000000, 0x7fffffff,
-    ]);
+    ]));
 
-    const SPECIAL_VALS: [Mersenne31; WIDTH] = Mersenne31::new_array([
+    const SPECIAL_VALS: PackedMersenne31AVX512 = PackedMersenne31AVX512(Mersenne31::new_array([
         0x00000000, 0x7fffffff, 0x00000001, 0x7ffffffe, 0x00000002, 0x7ffffffd, 0x40000000,
         0x3fffffff, 0x00000000, 0x7fffffff, 0x00000001, 0x7ffffffe, 0x00000002, 0x7ffffffd,
         0x40000000, 0x3fffffff,
-    ]);
+    ]));
 
     test_packed_field!(
         crate::PackedMersenne31AVX512,
-        crate::PackedMersenne31AVX512(super::ZEROS),
-        crate::PackedMersenne31AVX512(super::SPECIAL_VALS)
+        &[super::ZEROS],
+        &[crate::PackedMersenne31AVX512::ONE],
+        super::SPECIAL_VALS
     );
 }

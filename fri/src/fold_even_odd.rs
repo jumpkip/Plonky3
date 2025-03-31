@@ -31,7 +31,7 @@ pub fn fold_even_odd<F: TwoAdicField>(poly: Vec<F>, beta: F) -> Vec<F> {
     //                    + (1/2 - beta/2 g_inv^i) p(g^(n/2 + i))
     let m = RowMajorMatrix::new(poly, 2);
     let g_inv = F::two_adic_generator(log2_strict_usize(m.height()) + 1).inverse();
-    let one_half = F::TWO.inverse();
+    let one_half = F::ONE.halve();
     let half_beta = beta * one_half;
 
     // TODO: vectorize this (after we have packed extension fields)
@@ -57,7 +57,8 @@ mod tests {
     use itertools::izip;
     use p3_baby_bear::BabyBear;
     use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
-    use rand::{Rng, rng};
+    use rand::rngs::SmallRng;
+    use rand::{Rng, SeedableRng};
 
     use super::*;
 
@@ -65,7 +66,7 @@ mod tests {
     fn test_fold_even_odd() {
         type F = BabyBear;
 
-        let mut rng = rng();
+        let mut rng = SmallRng::seed_from_u64(1);
 
         let log_n = 10;
         let n = 1 << log_n;

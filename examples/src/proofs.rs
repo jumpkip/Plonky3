@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use core::fmt::Debug;
 
 use p3_challenger::{DuplexChallenger, SerializingChallenger32};
 use p3_circle::CirclePcs;
@@ -237,6 +237,10 @@ pub fn report_proof_size<SC>(proof: &Proof<SC>)
 where
     SC: StarkGenericConfig,
 {
-    let proof_bytes = bincode::serialize(proof).expect("Failed to serialize proof");
+    let config = bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding();
+    let proof_bytes =
+        bincode::serde::encode_to_vec(proof, config).expect("Failed to serialize proof");
     println!("Proof size: {} bytes", proof_bytes.len());
 }

@@ -193,6 +193,10 @@ where
         }
     }
 
+    fn mul_2exp_u64(&self, exp: u64) -> Self {
+        Self::new(self.value.clone().map(|x| x.mul_2exp_u64(exp)))
+    }
+
     #[inline]
     fn zero_vec(len: usize) -> Vec<Self> {
         // SAFETY: this is a repr(transparent) wrapper around an array.
@@ -227,6 +231,10 @@ impl<F: BinomiallyExtendable<D>, const D: usize> Field for BinomialExtensionFiel
 
     fn halve(&self) -> Self {
         Self::new(self.value.map(|x| x.halve()))
+    }
+
+    fn div_2exp_u64(&self, exp: u64) -> Self {
+        Self::new(self.value.map(|x| x.div_2exp_u64(exp)))
     }
 
     fn order() -> BigUint {
@@ -482,11 +490,7 @@ where
     Self: Distribution<F>,
 {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> BinomialExtensionField<F, D> {
-        let mut res = [F::ZERO; D];
-        for r in &mut res {
-            *r = Self.sample(rng);
-        }
-        BinomialExtensionField::from_basis_coefficients_slice(&res)
+        BinomialExtensionField::new(array::from_fn(|_| self.sample(rng)))
     }
 }
 
