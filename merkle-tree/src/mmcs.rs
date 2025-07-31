@@ -7,12 +7,12 @@
 //!
 //! ```rust,ignore
 //! ///
-//! ///                                      root = c00 = C(c10, c11)                              
-//! ///                       /                                                \         
+//! ///                                      root = c00 = C(c10, c11)
+//! ///                       /                                                \
 //! ///         c10 = C(C(c20, c21), H(N[0]))                     c11 = C(C(c22, c23), H(N[1]))
-//! ///           /                      \                          /                      \     
-//! ///      c20 = C(L, R)            c21 = C(L, R)            c22 = C(L, R)            c23 = C(L, R)  
-//! ///   L/             \R        L/             \R        L/             \R        L/             \R     
+//! ///           /                      \                          /                      \
+//! ///      c20 = C(L, R)            c21 = C(L, R)            c22 = C(L, R)            c23 = C(L, R)
+//! ///   L/             \R        L/             \R        L/             \R        L/             \R
 //! /// H(M[0])         H(M[1])  H(M[2])         H(M[3])  H(M[4])         H(M[5])  H(M[6])         H(M[7])
 //! ```
 //! E.g. we start by making a standard MerkleTree commitment for each row of M and then add in the rows of N when we
@@ -24,7 +24,7 @@ use core::cmp::Reverse;
 use core::marker::PhantomData;
 
 use itertools::Itertools;
-use p3_commit::Mmcs;
+use p3_commit::{BatchOpening, BatchOpeningRef, Mmcs};
 use p3_field::PackedValue;
 use p3_matrix::{Dimensions, Matrix};
 use p3_symmetric::{CryptographicHasher, Hash, PseudoCompressionFunction};
@@ -36,34 +36,60 @@ use crate::MerkleTreeError::{
     EmptyBatch, IncompatibleHeights, RootMismatch, WrongBatchSize, WrongHeight,
 };
 
-/// A vector commitment scheme backed by a `MerkleTree`.
+/// A Merkle Tree-based commitment scheme for multiple matrices of potentially differing heights.
 ///
-/// Generics:
-/// - `P`: a leaf value
-/// - `PW`: an element of a digest
-/// - `H`: the leaf hasher
-/// - `C`: the digest compression function
+/// `MerkleTreeMmcs` generalizes a classical Merkle Tree to support committing to a list of
+/// matrices by arranging their rows into a unified binary tree. The tallest matrix defines
+/// the maximum height, and smaller matrices are integrated at appropriate depths.
+///
+/// Type Parameters:
+/// - `P`: Packed leaf value (e.g. a field element or vector of elements)
+/// - `PW`: Packed digest element (used in the hash and compression output)
+/// - `H`: Cryptographic hash function (leaf hash)
+/// - `C`: Pseudo-compression function (internal node compression)
+/// - `DIGEST_ELEMS`: Number of elements in a single digest
 #[derive(Copy, Clone, Debug)]
 pub struct MerkleTreeMmcs<P, PW, H, C, const DIGEST_ELEMS: usize> {
+    /// The hash function used to hash individual matrix rows (leaf level).
     hash: H,
+
+    /// The compression function used to hash internal tree nodes.
     compress: C,
+
+    /// Phantom type to associate `P` and `PW` without storing values.
     _phantom: PhantomData<(P, PW)>,
 }
 
+/// Errors that may arise during Merkle tree commitment, opening, or verification.
 #[derive(Debug)]
 pub enum MerkleTreeError {
+    /// The number of openings provided does not match the expected number.
     WrongBatchSize,
+
+    /// A matrix has a different width than expected.
     WrongWidth,
+
+    /// The number of proof nodes does not match the expected tree height.
     WrongHeight {
+        /// Expected log2 of the maximum matrix height.
         log_max_height: usize,
+
+        /// Actual number of sibling hashes provided in the proof.
         num_siblings: usize,
     },
+
+    /// Matrix heights are incompatible; they cannot share a common binary Merkle tree.
     IncompatibleHeights,
+
+    /// The computed Merkle root does not match the provided commitment.
     RootMismatch,
+
+    /// Attempted to open an empty batch (no committed matrices).
     EmptyBatch,
 }
 
 impl<P, PW, H, C, const DIGEST_ELEMS: usize> MerkleTreeMmcs<P, PW, H, C, DIGEST_ELEMS> {
+    /// Create a new `MerkleTreeMmcs` with the given hash and compression functions.
     pub const fn new(hash: H, compress: C) -> Self {
         Self {
             hash,
@@ -112,7 +138,7 @@ where
         &self,
         index: usize,
         prover_data: &MerkleTree<P::Value, PW::Value, M, DIGEST_ELEMS>,
-    ) -> (Vec<Vec<P::Value>>, Self::Proof) {
+    ) -> BatchOpening<P::Value, Self> {
         let max_height = self.get_max_height(prover_data);
         let log_max_height = log2_ceil_usize(max_height);
 
@@ -124,7 +150,7 @@ where
                 let log2_height = log2_ceil_usize(matrix.height());
                 let bits_reduced = log_max_height - log2_height;
                 let reduced_index = index >> bits_reduced;
-                matrix.row(reduced_index).collect()
+                matrix.row(reduced_index).unwrap().into_iter().collect()
             })
             .collect_vec();
 
@@ -133,7 +159,7 @@ where
             .map(|i| prover_data.digest_layers[i][(index >> i) ^ 1])
             .collect();
 
-        (openings, proof)
+        BatchOpening::new(openings, proof)
     }
 
     fn get_matrices<'a, M: Matrix<P::Value>>(
@@ -160,9 +186,9 @@ where
         commit: &Self::Commitment,
         dimensions: &[Dimensions],
         mut index: usize,
-        opened_values: &[Vec<P::Value>],
-        proof: &Self::Proof,
+        batch_proof: BatchOpeningRef<P::Value, Self>,
     ) -> Result<(), Self::Error> {
+        let (opened_values, opening_proof) = batch_proof.unpack();
         // Check that the openings have the correct shape.
         if dimensions.len() != opened_values.len() {
             return Err(WrongBatchSize);
@@ -202,10 +228,10 @@ where
             Some((_, dims)) => {
                 let max_height = dims.height.next_power_of_two();
                 let log_max_height = log2_strict_usize(max_height);
-                if proof.len() != log_max_height {
+                if opening_proof.len() != log_max_height {
                     return Err(WrongHeight {
                         log_max_height,
-                        num_siblings: proof.len(),
+                        num_siblings: opening_proof.len(),
                     });
                 }
                 max_height
@@ -222,7 +248,7 @@ where
                 .map(|(i, _)| opened_values[i].as_slice()),
         );
 
-        for &sibling in proof {
+        for &sibling in opening_proof {
             // The last bit of index informs us whether the current node is on the left or right.
             let (left, right) = if index & 1 == 0 {
                 (root, sibling)
@@ -475,7 +501,7 @@ mod tests {
 
         assert_eq!(commit, expected_result);
 
-        let (opened_values, _proof) = mmcs.open_batch(2, &prover_data);
+        let (opened_values, _) = mmcs.open_batch(2, &prover_data).unpack();
         assert_eq!(
             opened_values,
             vec![vec![F::TWO, F::TWO], vec![F::ZERO, F::TWO, F::TWO]]
@@ -538,14 +564,13 @@ mod tests {
         let (commit, prover_data) = mmcs.commit(mats);
 
         // open the 3rd row of each matrix, mess with proof, and verify
-        let (opened_values, mut proof) = mmcs.open_batch(3, &prover_data);
-        proof[0][0] += F::ONE;
+        let mut batch_opening = mmcs.open_batch(3, &prover_data);
+        batch_opening.opening_proof[0][0] += F::ONE;
         mmcs.verify_batch(
             &commit,
             &large_mat_dims.chain(small_mat_dims).collect_vec(),
             3,
-            &opened_values,
-            &proof,
+            (&batch_opening).into(),
         )
         .expect_err("expected verification to fail");
     }
@@ -591,7 +616,7 @@ mod tests {
         let (commit, prover_data) = mmcs.commit(mats);
 
         // open the 6th row of each matrix and verify
-        let (opened_values, proof) = mmcs.open_batch(6, &prover_data);
+        let batch_opening = mmcs.open_batch(6, &prover_data);
         mmcs.verify_batch(
             &commit,
             &large_mat_dims
@@ -600,8 +625,7 @@ mod tests {
                 .chain(tiny_mat_dims)
                 .collect_vec(),
             6,
-            &opened_values,
-            &proof,
+            (&batch_opening).into(),
         )
         .expect("expected verification to succeed");
     }
@@ -621,8 +645,8 @@ mod tests {
         let dims = mats.iter().map(|m| m.dimensions()).collect_vec();
 
         let (commit, prover_data) = mmcs.commit(mats);
-        let (opened_values, proof) = mmcs.open_batch(17, &prover_data);
-        mmcs.verify_batch(&commit, &dims, 17, &opened_values, &proof)
+        let batch_opening = mmcs.open_batch(17, &prover_data);
+        mmcs.verify_batch(&commit, &dims, 17, (&batch_opening).into())
             .expect("expected verification to succeed");
     }
 }

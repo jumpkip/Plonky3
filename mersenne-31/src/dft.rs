@@ -37,7 +37,10 @@ type C = Complex<Mersenne31>;
 /// domain Mersenne31Complex; it is inverse to `idft_postprocess()`
 /// below.
 fn dft_preprocess(input: RowMajorMatrix<F>) -> RowMajorMatrix<C> {
-    assert!(input.height() % 2 == 0, "input height must be even");
+    assert!(
+        input.height().is_multiple_of(2),
+        "input height must be even"
+    );
     RowMajorMatrix::new(
         input
             .rows()
@@ -70,10 +73,20 @@ fn dft_postprocess(input: RowMajorMatrix<C>) -> RowMajorMatrix<C> {
     let mut omega_j = omega;
 
     let mut output = Vec::with_capacity((h + 1) * input.width());
-    output.extend(input.first_row().map(|x| C::new_real(x.real() + x.imag())));
+    output.extend(
+        input
+            .first_row()
+            .unwrap() // The matrix is non-empty so this unwrap should never panic.
+            .into_iter()
+            .map(|x| C::new_real(x.real() + x.imag())),
+    );
 
     for j in 1..h {
-        let row = izip!(input.row(j), input.row(h - j)).map(|(x, y)| {
+        let row_iter = unsafe {
+            // Safety: We know that 0 < j < h = input.height()
+            izip!(input.row_unchecked(j), input.row_unchecked(h - j))
+        };
+        let row = row_iter.map(|(x, y)| {
             let even = x + y.conjugate();
             // odd = (x - y.conjugate()) * -i
             let odd = C::new_complex(x.imag() + y.imag(), y.real() - x.real());
@@ -83,7 +96,13 @@ fn dft_postprocess(input: RowMajorMatrix<C>) -> RowMajorMatrix<C> {
         omega_j *= omega;
     }
 
-    output.extend(input.first_row().map(|x| C::new_real(x.real() - x.imag())));
+    output.extend(
+        input
+            .first_row()
+            .unwrap() // The matrix is non-empty so this unwrap should never panic.
+            .into_iter()
+            .map(|x| C::new_real(x.real() - x.imag())),
+    );
     debug_assert_eq!(output.len(), (h + 1) * input.width());
     RowMajorMatrix::new(output, input.width())
 }
@@ -106,7 +125,11 @@ fn idft_preprocess(input: RowMajorMatrix<C>) -> RowMajorMatrix<C> {
     let mut output = Vec::with_capacity(h * input.width());
     // TODO: Specialise j = 0 and j = n (which we know must be real)?
     for j in 0..h {
-        let row = izip!(input.row(j), input.row(h - j)).map(|(x, y)| {
+        let row_iter = unsafe {
+            // Safety: We know that 0 = j < h < input.height()
+            izip!(input.row_unchecked(j), input.row_unchecked(h - j))
+        };
+        let row = row_iter.map(|(x, y)| {
             let even = x + y.conjugate();
             // odd = (x - y.conjugate()) * -i
             let odd = C::new_complex(x.imag() + y.imag(), y.real() - x.real());

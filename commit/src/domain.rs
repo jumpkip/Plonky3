@@ -2,10 +2,7 @@ use alloc::vec::Vec;
 
 use itertools::Itertools;
 use p3_field::coset::TwoAdicMultiplicativeCoset;
-use p3_field::{
-    ExtensionField, Field, TwoAdicField, batch_multiplicative_inverse,
-    cyclic_subgroup_coset_known_order,
-};
+use p3_field::{ExtensionField, Field, TwoAdicField, batch_multiplicative_inverse};
 use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::{log2_ceil_usize, log2_strict_usize};
@@ -91,6 +88,7 @@ pub trait PolynomialSpace: Copy {
     /// of polynomial evaluations over each `PolynomialSpace` generated from `split_domains`.
     ///
     /// `evals.height()` must equal `self.size()` and `num_chunks` must divide `self.size()`.
+    /// `evals` are assumed to be in standard (not bit-reversed) order.
     fn split_evals(
         &self,
         num_chunks: usize,
@@ -209,7 +207,7 @@ impl<Val: TwoAdicField> PolynomialSpace for TwoAdicMultiplicativeCoset<Val> {
     ///
     /// `Z_{gH}(X) = g^{-|H|}\prod_{h \in H} (X - gh) = (g^{-1}X)^|H| - 1`
     fn vanishing_poly_at_point<Ext: ExtensionField<Val>>(&self, point: Ext) -> Ext {
-        (point * self.shift().inverse()).exp_power_of_2(self.log_size()) - Ext::ONE
+        (point * self.shift_inverse()).exp_power_of_2(self.log_size()) - Ext::ONE
     }
 
     /// Compute several Lagrange selectors at the given point:
@@ -220,7 +218,7 @@ impl<Val: TwoAdicField> PolynomialSpace for TwoAdicMultiplicativeCoset<Val> {
     /// - `(g^{-1}X - h^{-1})`: The Lagrange selector of the subset consisting of everything but the point `gh^{-1}`.
     /// - `1/Z_{gH}(X)`: The inverse of the vanishing polynomial.
     fn selectors_at_point<Ext: ExtensionField<Val>>(&self, point: Ext) -> LagrangeSelectors<Ext> {
-        let unshifted_point = point * self.shift().inverse();
+        let unshifted_point = point * self.shift_inverse();
         let z_h = unshifted_point.exp_power_of_2(self.log_size()) - Ext::ONE;
         LagrangeSelectors {
             is_first_row: z_h / (unshifted_point - Ext::ONE),
@@ -248,12 +246,7 @@ impl<Val: TwoAdicField> PolynomialSpace for TwoAdicMultiplicativeCoset<Val> {
             .map(|x| s_pow_n * x - Val::ONE)
             .collect_vec();
 
-        let xs = cyclic_subgroup_coset_known_order(
-            coset.subgroup_generator(),
-            coset.shift(),
-            coset.size(),
-        )
-        .collect_vec();
+        let xs = coset.iter().collect();
 
         let single_point_selector = |i: u64| {
             let coset_i = self.subgroup_generator().exp_u64(i);

@@ -6,23 +6,27 @@ use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::Hash;
 use core::iter::{Product, Sum};
 use core::marker::PhantomData;
-use core::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
+use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use core::{array, iter};
 
 use num_bigint::BigUint;
 use p3_field::integers::QuotientMap;
+use p3_field::op_assign_macros::{
+    impl_add_assign, impl_div_methods, impl_mul_methods, impl_sub_assign,
+};
 use p3_field::{
     Field, InjectiveMonomial, Packable, PermutationMonomial, PrimeCharacteristicRing, PrimeField,
     PrimeField32, PrimeField64, RawDataSerializable, TwoAdicField,
     impl_raw_serializable_primefield32, quotient_map_small_int,
 };
-use p3_util::flatten_to_base;
+use p3_util::{flatten_to_base, gcd_inversion_prime_field_32};
 use rand::Rng;
 use rand::distr::{Distribution, StandardUniform};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::utils::{
-    from_monty, halve_u32, monty_reduce, to_monty, to_monty_64, to_monty_64_signed, to_monty_signed,
+    from_monty, halve_u32, large_monty_reduce, monty_reduce, monty_reduce_u128, to_monty,
+    to_monty_64, to_monty_64_signed, to_monty_signed,
 };
 use crate::{FieldParameters, MontyParameters, RelativelyPrimePower, TwoAdicData};
 
@@ -162,7 +166,7 @@ impl<'de, FP: FieldParameters> Deserialize<'de> for MontyField31<FP> {
     }
 }
 
-impl<FP: FieldParameters> Packable for MontyField31<FP> {}
+impl<MP: MontyParameters> Packable for MontyField31<MP> {}
 
 impl<FP: FieldParameters> PrimeCharacteristicRing for MontyField31<FP> {
     type PrimeSubfield = Self;
@@ -218,6 +222,125 @@ impl<FP: FieldParameters> PrimeCharacteristicRing for MontyField31<FP> {
             _ => input.iter().copied().sum(),
         }
     }
+
+    #[inline]
+    fn dot_product<const N: usize>(lhs: &[Self; N], rhs: &[Self; N]) -> Self {
+        assert!(N as u64 <= (1 << 34));
+        // This code relies on assumptions about the relative size of the
+        // prime and the monty parameter. If these are changes this needs to be checked.
+        debug_assert!(FP::MONTY_BITS == 32);
+        debug_assert!((FP::PRIME as u64) < (1 << 31));
+        match N {
+            0 => Self::ZERO,
+            1 => lhs[0] * rhs[0],
+            2 => {
+                // As all values are < P < 2^31, the products are < P^2 < 2^31P.
+                // Hence, summing two together we stay below MONTY*P which means
+                // monty_reduce will produce a valid result.
+                let u64_prod_sum = (lhs[0].value as u64) * (rhs[0].value as u64)
+                    + (lhs[1].value as u64) * (rhs[1].value as u64);
+                Self::new_monty(monty_reduce::<FP>(u64_prod_sum))
+            }
+            3 => {
+                // As all values are < P < 2^31, the products are < P^2 < 2^31P.
+                // Hence, summing three together will be less than 2 * MONTY * P
+                let u64_prod_sum = (lhs[0].value as u64) * (rhs[0].value as u64)
+                    + (lhs[1].value as u64) * (rhs[1].value as u64)
+                    + (lhs[2].value as u64) * (rhs[2].value as u64);
+                Self::new_monty(large_monty_reduce::<FP>(u64_prod_sum))
+            }
+            4 => {
+                // As all values are < P < 2^31, the products are < P^2 < 2^31P.
+                // Hence, summing four together will be less than 2 * MONTY * P.
+                let u64_prod_sum = (lhs[0].value as u64) * (rhs[0].value as u64)
+                    + (lhs[1].value as u64) * (rhs[1].value as u64)
+                    + (lhs[2].value as u64) * (rhs[2].value as u64)
+                    + (lhs[3].value as u64) * (rhs[3].value as u64);
+                Self::new_monty(large_monty_reduce::<FP>(u64_prod_sum))
+            }
+            5 => {
+                let head_sum = (lhs[0].value as u64) * (rhs[0].value as u64)
+                    + (lhs[1].value as u64) * (rhs[1].value as u64)
+                    + (lhs[2].value as u64) * (rhs[2].value as u64)
+                    + (lhs[3].value as u64) * (rhs[3].value as u64);
+                let tail_sum = (lhs[4].value as u64) * (rhs[4].value as u64);
+                // head_sum < 4*P^2, tail_sum < P^2.
+                let head_sum_corr = head_sum.wrapping_sub((FP::PRIME as u64) << FP::MONTY_BITS);
+                // head_sum.min(head_sum_corr) is guaranteed to be < 2*P^2.
+                // Hence sum < 4P^2 < 2 * MONTY * P
+                let sum = head_sum.min(head_sum_corr) + tail_sum;
+                Self::new_monty(large_monty_reduce::<FP>(sum))
+            }
+            6 => {
+                let head_sum = (lhs[0].value as u64) * (rhs[0].value as u64)
+                    + (lhs[1].value as u64) * (rhs[1].value as u64)
+                    + (lhs[2].value as u64) * (rhs[2].value as u64)
+                    + (lhs[3].value as u64) * (rhs[3].value as u64);
+                let tail_sum = (lhs[4].value as u64) * (rhs[4].value as u64)
+                    + (lhs[5].value as u64) * (rhs[5].value as u64);
+                // head_sum < 4*P^2, tail_sum < 2*P^2.
+                let head_sum_corr = head_sum.wrapping_sub((FP::PRIME as u64) << FP::MONTY_BITS);
+                // head_sum.min(head_sum_corr) is guaranteed to be < 2*P^2.
+                // Hence sum < 4P^2 < 2 * MONTY * P
+                let sum = head_sum.min(head_sum_corr) + tail_sum;
+                Self::new_monty(large_monty_reduce::<FP>(sum))
+            }
+            7 => {
+                let head_sum = (lhs[0].value as u64) * (rhs[0].value as u64)
+                    + (lhs[1].value as u64) * (rhs[1].value as u64)
+                    + (lhs[2].value as u64) * (rhs[2].value as u64)
+                    + (lhs[3].value as u64) * (rhs[3].value as u64);
+                let tail_sum = (lhs[4].value as u64) * (rhs[4].value as u64)
+                    + lhs[5].value as u64 * (rhs[5].value as u64)
+                    + lhs[6].value as u64 * (rhs[6].value as u64);
+                // head_sum, tail_sum are guaranteed to be < 4*P^2.
+                let head_sum_corr = head_sum.wrapping_sub((FP::PRIME as u64) << FP::MONTY_BITS);
+                let tail_sum_corr = tail_sum.wrapping_sub((FP::PRIME as u64) << FP::MONTY_BITS);
+                // head_sum.min(head_sum_corr), tail_sum.min(tail_sum_corr) is guaranteed to be < 2*P^2.
+                // Hence sum < 4P^2 < 2 * MONTY * P
+                let sum = head_sum.min(head_sum_corr) + tail_sum.min(tail_sum_corr);
+                Self::new_monty(large_monty_reduce::<FP>(sum))
+            }
+            8 => {
+                let head_sum = (lhs[0].value as u64) * (rhs[0].value as u64)
+                    + (lhs[1].value as u64) * (rhs[1].value as u64)
+                    + (lhs[2].value as u64) * (rhs[2].value as u64)
+                    + (lhs[3].value as u64) * (rhs[3].value as u64);
+                let tail_sum = (lhs[4].value as u64) * (rhs[4].value as u64)
+                    + lhs[5].value as u64 * (rhs[5].value as u64)
+                    + lhs[6].value as u64 * (rhs[6].value as u64)
+                    + lhs[7].value as u64 * (rhs[7].value as u64);
+                // head_sum, tail_sum are guaranteed to be < 4*P^2.
+                let head_sum_corr = head_sum.wrapping_sub((FP::PRIME as u64) << FP::MONTY_BITS);
+                let tail_sum_corr = tail_sum.wrapping_sub((FP::PRIME as u64) << FP::MONTY_BITS);
+                // head_sum.min(head_sum_corr), tail_sum.min(tail_sum_corr) is guaranteed to be < 2*P^2.
+                // Hence sum < 4P^2 < 2 * MONTY * P
+                let sum = head_sum.min(head_sum_corr) + tail_sum.min(tail_sum_corr);
+                Self::new_monty(large_monty_reduce::<FP>(sum))
+            }
+            _ => {
+                // For large enough N, we accumulate into a u128. This helps the compiler as it lets
+                // it do a lot of computation in parallel as it knows that summing u128's is associative.
+                let acc_u128 = lhs
+                    .chunks(4)
+                    .zip(rhs.chunks(4))
+                    .map(|(l, r)| {
+                        // As all values are < P < 2^31, the products are < P^2 < 2^31P.
+                        // Hence, summing four together will not overflow a u64 but will be
+                        // larger than 2^32P.
+                        let u64_prod_sum = l
+                            .iter()
+                            .zip(r)
+                            .map(|(l, r)| (l.value as u64) * (r.value as u64))
+                            .sum::<u64>();
+                        u64_prod_sum as u128
+                    })
+                    .sum();
+                // As N <= 2^34 by the earlier assertion, acc_u128 <= 2^34 * P^2 < 2^34 * 2^62 < 2^96.
+                Self::new_monty(monty_reduce_u128::<FP>(acc_u128))
+            }
+        }
+    }
 }
 
 impl<FP: FieldParameters + RelativelyPrimePower<D>, const D: u64> InjectiveMonomial<D>
@@ -270,7 +393,36 @@ impl<FP: FieldParameters> Field for MontyField31<FP> {
     const GENERATOR: Self = FP::MONTY_GEN;
 
     fn try_inverse(&self) -> Option<Self> {
-        FP::try_inverse(*self)
+        if self.is_zero() {
+            return None;
+        }
+
+        // The number of bits of FP::PRIME. By the very name of MontyField31 this should always be 31.
+        const NUM_PRIME_BITS: u32 = 31;
+
+        // Get the inverse using a gcd algorithm.
+        // We use `val` to denote the input to `gcd_inversion_prime_field_32` and `R = 2^{MONTY_BITS}`
+        // our monty constant.
+        // The function gcd_inversion_31_bit_field maps `val mod P -> 2^{60}val mod P`
+        let gcd_inverse = gcd_inversion_prime_field_32::<NUM_PRIME_BITS>(self.value, FP::PRIME);
+
+        // Currently |gcd_inverse| <= 2^{NUM_PRIME_BITS - 2} <= 2^{60}
+        // As P > 2^{30}, 0 < 2^{30}P + gcd_inverse < 2^61
+        let pos_inverse = (((FP::PRIME as i64) << 30) + gcd_inverse) as u64;
+
+        // We could do a % operation here, but monty reduction is faster.
+        // This does remove a factor of `R` from the result so we will need to
+        // correct for that.
+        let uncorrected_value = Self::new_monty(monty_reduce::<FP>(pos_inverse as u64));
+
+        // Currently, uncorrected_value = R^{-1} * 2^{60} * val^{-1} mod P = 2^{28} * val^{-1} mod P`.
+        // But `val` is really the monty form of some value `x` satisfying `val = xR mod P`. We want
+        // `x^{-1}R mod P = R^2 x^{-1}R^{-1} mod P = 2^{64} val^{-1} mod P`.
+        // Hence we need to multiply by 2^{64 - 28} = 2^{36}.
+
+        // Unrolling the definitions a little, this 36 comes from: 3 * FP::MONTY_BITS - (2 * NUM_PRIME_BITS - 2)
+
+        Some(uncorrected_value.mul_2exp_u64((3 * FP::MONTY_BITS - (2 * NUM_PRIME_BITS - 2)) as u64))
     }
 
     #[inline]
@@ -515,25 +667,6 @@ impl<FP: MontyParameters> Add for MontyField31<FP> {
     }
 }
 
-impl<FP: MontyParameters> AddAssign for MontyField31<FP> {
-    #[inline]
-    fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
-    }
-}
-
-impl<FP: MontyParameters> Sum for MontyField31<FP> {
-    #[inline]
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        // This is faster than iter.reduce(|x, y| x + y).unwrap_or(Self::ZERO) for iterators of length > 2.
-        // There might be a faster reduction method possible for lengths <= 16 which avoids %.
-
-        // This sum will not overflow so long as iter.len() < 2^33.
-        let sum = iter.map(|x| x.value as u64).sum::<u64>();
-        Self::new_monty((sum % FP::PRIME as u64) as u32)
-    }
-}
-
 impl<FP: MontyParameters> Sub for MontyField31<FP> {
     type Output = Self;
 
@@ -543,13 +676,6 @@ impl<FP: MontyParameters> Sub for MontyField31<FP> {
         let corr = if over { FP::PRIME } else { 0 };
         diff = diff.wrapping_add(corr);
         Self::new_monty(diff)
-    }
-}
-
-impl<FP: MontyParameters> SubAssign for MontyField31<FP> {
-    #[inline]
-    fn sub_assign(&mut self, rhs: Self) {
-        *self = *self - rhs;
     }
 }
 
@@ -572,26 +698,19 @@ impl<FP: MontyParameters> Mul for MontyField31<FP> {
     }
 }
 
-impl<FP: MontyParameters> MulAssign for MontyField31<FP> {
-    #[inline]
-    fn mul_assign(&mut self, rhs: Self) {
-        *self = *self * rhs;
-    }
-}
+impl_add_assign!(MontyField31, (MontyParameters, MP));
+impl_sub_assign!(MontyField31, (MontyParameters, MP));
+impl_mul_methods!(MontyField31, (FieldParameters, FP));
+impl_div_methods!(MontyField31, MontyField31, (FieldParameters, FP));
 
-impl<FP: FieldParameters> Product for MontyField31<FP> {
+impl<FP: MontyParameters> Sum for MontyField31<FP> {
     #[inline]
-    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.reduce(|x, y| x * y).unwrap_or(Self::ONE)
-    }
-}
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        // This is faster than iter.reduce(|x, y| x + y).unwrap_or(Self::ZERO) for iterators of length > 2.
+        // There might be a faster reduction method possible for lengths <= 16 which avoids %.
 
-impl<FP: FieldParameters> Div for MontyField31<FP> {
-    type Output = Self;
-
-    #[allow(clippy::suspicious_arithmetic_impl)]
-    #[inline]
-    fn div(self, rhs: Self) -> Self {
-        self * rhs.inverse()
+        // This sum will not overflow so long as iter.len() < 2^33.
+        let sum = iter.map(|x| x.value as u64).sum::<u64>();
+        Self::new_monty((sum % FP::PRIME as u64) as u32)
     }
 }

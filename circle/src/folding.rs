@@ -6,25 +6,25 @@ use itertools::Itertools;
 use p3_commit::Mmcs;
 use p3_field::extension::ComplexExtendable;
 use p3_field::{ExtensionField, batch_multiplicative_inverse};
-use p3_fri::FriGenericConfig;
+use p3_fri::FriFoldingStrategy;
 use p3_matrix::Matrix;
 use p3_util::{log2_strict_usize, reverse_bits_len};
 
 use crate::domain::CircleDomain;
 use crate::{CircleInputProof, InputError};
 
-pub(crate) struct CircleFriGenericConfig<F, InputProof, InputError>(
+pub(crate) struct CircleFriFolding<F, InputProof, InputError>(
     pub(crate) PhantomData<(F, InputProof, InputError)>,
 );
 
-pub(crate) type CircleFriConfig<Val, Challenge, InputMmcs, FriMmcs> = CircleFriGenericConfig<
+pub(crate) type CircleFriFoldingForMmcs<Val, Challenge, InputMmcs, FriMmcs> = CircleFriFolding<
     Val,
     CircleInputProof<Val, Challenge, InputMmcs, FriMmcs>,
     InputError<<InputMmcs as Mmcs<Val>>::Error, <FriMmcs as Mmcs<Challenge>>::Error>,
 >;
 
 impl<F: ComplexExtendable, EF: ExtensionField<F>, InputProof, InputError: Debug>
-    FriGenericConfig<EF> for CircleFriGenericConfig<F, InputProof, InputError>
+    FriFoldingStrategy<F, EF> for CircleFriFolding<F, InputProof, InputError>
 {
     type InputProof = InputProof;
     type InputError = InputError;
@@ -151,13 +151,13 @@ mod tests {
 
         let mat_y_folded = fold_y::<F, EF>(beta, m.as_view());
         let row_y_folded = (0..(1 << log_folded_height))
-            .map(|i| fold_y_row::<F, EF>(i, log_folded_height, beta, m.row(i)))
+            .map(|i| fold_y_row::<F, EF>(i, log_folded_height, beta, m.row(i).unwrap().into_iter()))
             .collect_vec();
         assert_eq!(mat_y_folded, row_y_folded);
 
         let mat_x_folded = fold_x::<F, EF>(beta, m.as_view());
         let row_x_folded = (0..(1 << log_folded_height))
-            .map(|i| fold_x_row::<F, EF>(i, log_folded_height, beta, m.row(i)))
+            .map(|i| fold_x_row::<F, EF>(i, log_folded_height, beta, m.row(i).unwrap().into_iter()))
             .collect_vec();
         assert_eq!(mat_x_folded, row_x_folded);
     }
